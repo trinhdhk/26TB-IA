@@ -1,0 +1,672 @@
+---
+title: "26TB - Third interim analysis"
+author: "Code preparation: Trinh Dong, Thao Le, and Ronald Geskus; DSMB statistician: Sarah Walker"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+    toc_float: yes
+  word_document:
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r, echo=FALSE,include=FALSE}
+rm(list = ls()[!ls()%in%c('project.dir', 'dummy')])
+knitr::opts_chunk$set(echo = FALSE)
+
+if(!exists('dummy')) dummy <- T # T for all analysis based on the dummy (fake) randomization list; set to F for the real analysis
+```
+
+```{r results="asis"}
+cat('<style>td{font-size:10.5px; padding:5.5px!important} th{font-size:11px}</style>')
+```
+
+```{r, echo=FALSE, include=FALSE}
+## Data preparation
+project.dir <- getwd()
+codeFiles <- list.files('code', '.R$')
+for (codeFile in codeFiles) source(paste('code', codeFile, sep = '/'))
+```
+
+# Background
+
+This document presents the outputs for the third formal interim analysis of the 26TB trial as pre-defined in the interim analysis plan. Patients who were recruited after **Jan 31st, 2019** are not included in the database. 
+
+```{r,echo=FALSE,include=FALSE}
+rm(list=ls()[!ls()%in%c('project.dir', 'dummy')])
+
+## Source functions used for generating the outputs
+source('code/_includes/miscFun.R')
+source('code/_includes/usefulFunc.R')
+
+read_randolist <- function(randolistPath, ...) read_csv_excel(randolistPath, ...)
+
+##---------------------- Load all libraries  ---------------------- 
+library(knitr)
+library(Hmisc)
+library(survival)
+library(rmarkdown)
+library(tidyverse)
+library(haven)
+library(kableExtra)
+library(gdata)
+library(xtable)
+library(lubridate)
+is.na.blank <- function(x){
+  ifelse(is.na(x) | x == '', TRUE, FALSE)
+}
+
+options(contrasts=c("contr.treatment","contr.treatment"), knitr.table.format = "html") # treatment contrasts also for ordered factors
+
+#---------- Import data, merge randomization code -------------------
+cutoff <- as.Date("01/31/2019","%m/%d/%Y") # date of data cut-off
+
+## Import study data (and perform some data manipulations)
+
+load('Rdata/26TB_vad.Rdata')
+load('Rdata/tbmdiagnosis.Rdata')
+
+names(ae) <- tolower(names(ae))
+names(ae_missing) <- tolower(names(ae_missing))
+names(base) <- tolower(names(base))
+names(endpoint) <- tolower(names(endpoint))
+names(labae) <- tolower(names(labae))
+names(odafter) <- tolower(names(odafter))
+names(odduring) <- tolower(names(odduring))
+names(tbmdiagnosis) <- tolower(names(tbmdiagnosis))
+names(dili) <- tolower(names(dili))
+
+names(base.27TB) <- tolower(names(base.27TB))
+names(dili.27TB) <- tolower(names(dili.27TB))
+
+## Randomization list
+randolist.dir <- 'randoList'
+randolist.files.26TB <- list.files(randolist.dir, pattern = '^26TB_\\w+\\.(csv|xls|xlsx)$', full.names = TRUE)
+randolist.files.27TB <- list.files(randolist.dir, pattern = '^27TB_\\w+\\.(csv|xls|xlsx)$', full.names = TRUE)
+
+randolist <- do.call(bind_rows,
+                         lapply(randolist.files.26TB,
+                                function(file) read_randolist(file, col_types = 'cccccc')))
+
+randolist.27TB <- 
+  do.call(bind_rows,
+          lapply(randolist.files.27TB,
+                                function(file) read_randolist(file, col_types = 'ccccccccc')))
+
+randolist <- randolist %>% select(arm, pat.id) %>% dplyr::rename(ranno = pat.id)
+randolist.27TB <- randolist.27TB %>% select(arm, pat.id.full) %>% dplyr::rename(ranno = pat.id.full)
+randolist.combined <- rbind(randolist, randolist.27TB)
+
+if (dummy) arms <- c("Dummy A","Dummy B") else arms <- c("Dexamethasone","Placebo")
+
+randolist$arm <- factor(randolist$arm, levels = arms)
+randolist.27TB$arm <- factor(randolist.27TB$arm, levels = arms)
+randolist.combined$arm <- factor(randolist.combined$arm, levels = arms)
+                                      
+## Merge baseline randomization list, characteristics, and endpoints
+## Check if baseline date after cutoff date
+
+### For 26TB
+any(base$bl_date <= cutoff) # --> take all patients in the data
+base <- base %>% filter(bl_date <= cutoff)  
+meta.nBL <- nrow(base)
+meta.nSCR <- nrow(filter(SCR, DATERANDOM <= cutoff))
+
+### For 27TB
+any(base.27TB$bl_date <= cutoff)
+base.27TB <- base.27TB %>% filter(bl_date <= cutoff)
+
+
+bl.ep <- randolist %>% right_join(base, by = 'ranno') %>% left_join(endpoint, by = "usubjid")
+pop <- select(bl.ep, usubjid,arm)
+
+bl.ep.27TB <- 
+  randolist.27TB %>%
+  right_join(base.27TB, by = 'ranno') %>% 
+  dplyr::rename(genotype = lta4hresult)
+
+# Format variables
+bl.ep$tbmgrade <- as.factor(bl.ep$tbmgrade)
+bl.ep$site <- factor(bl.ep$site, levels = c("HTD","PNT","Cip","Persahabatan"), labels = c("HTD","PNT","Cipto","Persahabatan"))
+tbmdiagnosis$diagnostic_score <- factor(tbmdiagnosis$diagnostic_score, 
+                                        levels = c("definite TBM","probable TBM","possible TBM","confirmed other diagnosis"))
+
+```
+
+### Table 1: Summary of baseline characteristics at study entry
+
+```{r, echo=FALSE, include=FALSE}
+# Manually derive date start art
+tmp <- bl.ep
+tmp$artstart[tmp$artstart =="5 days"] <- "03/2018" # as the baseline date is 14/03/2018
+tmp$artstart <-
+  if_else(grepl('^00\\/\\d{2}$',tmp$artstart, perl = T), paste0('20', substr(tmp$artstart, 4, 5)), tmp$artstart)
+tmp$artstart[tmp$artstart =="2/4/2018"] <- "2/04/2018"
+
+tmp$dateformats <- sapply(tmp$artstart,
+                            function(.artstart) {
+                              if (!is.na.blank(.artstart)) lubridate::guess_formats(.artstart, orders = c('y','my','dmy'))[[1]]
+                              else NA
+                            })
+
+tmp <- 
+  tmp %>%
+  mutate(
+    artstart.lubridate =
+      as.Date(
+        if_else(
+          !is.na(dateformats),
+          lubridate::parse_date_time(artstart, orders = na.omit(dateformats)),
+          as.POSIXct(NA)
+        ) 
+      ),
+    duration = 
+      if_else(
+        grepl('[dD]', dateformats, perl = TRUE),
+        as.numeric(bl_date - artstart.lubridate)/92,
+        if_else(
+          grepl('[mM]', dateformats, perl = TRUE),
+          as.numeric((year(bl_date) - year(artstart.lubridate))*12 + month(bl_date) - month(artstart.lubridate))/3,
+          if_else(
+            year(bl_date) -  year(artstart.lubridate) > 1,
+            1.1,
+            if_else(
+              year(bl_date) - year(artstart.lubridate) == 1,
+              if_else(
+                month(bl_date) >= 3,
+                1.1,
+                Inf
+              ),
+              if_else(
+                year(bl_date) == year(artstart.lubridate),
+                Inf,
+                as.numeric(NA)
+              )
+            )
+          )
+        )
+      ),
+    art.status = 
+      if_else(
+        duration == Inf,
+        'Undetermined',
+        if_else(
+          duration > 1,
+          '> 3 months of ART',
+          '<= 3 months of ART'
+        )
+      )
+  ) 
+
+bl.ep$art.status <- ifelse(bl.ep$art_bl=="naive", "ART naive", tmp$art.status)
+bl.ep$art.status[is.na(bl.ep$art.status)] <- "Unknown"
+
+## Create data for basic characteristic table
+part1 <- select(bl.ep, age, sex, tbmgrade, site, cd4,fastgluc, art.status, diabetes, usubjid)
+part2 <- select(tbmdiagnosis, usubjid, diagnostic_score)
+
+tab.dat <- merge(part1, part2, by = "usubjid")
+tab.dat <- merge(tab.dat, pop, by = "usubjid")
+names(tab.dat)[names(tab.dat) == "fastgluc"] <- "glucose_bl"
+tab.dat <- tab.dat %>% mutate(
+  diabetes = case_when(
+    diabetes == 'Y' ~ 'Yes',
+    diabetes == 'N' ~ 'No',
+    diabetes == 'UNK' ~ 'Unknown'
+   )
+)
+tab.dat$diabetes <- factor(tab.dat$diabetes, levels = c('Yes', 'No', 'Unknown'))
+
+Hmisc::label(tab.dat[, c("age", "sex", "tbmgrade","site","diagnostic_score","art.status","cd4","glucose_bl","diabetes")]) <-
+list('Age', 'Sex', 'TBM Grade', 'Site', 'Diagnostic Score', 'ART Status', 'CD4', 'Fasting Blood Glucose', 'Diabetes')
+
+tab <-mySummary.allvar(blvars=tab.dat[, c("age", "sex", "tbmgrade","site","diagnostic_score","art.status","cd4","glucose_bl","diabetes")], group = tab.dat$arm, contSummary = "med.IQR", pval.comparison=F)
+colnames(tab)<-c(tab[2,])
+
+```
+
+```{r}
+kable(tab[-2,], "html") %>%
+  kable_styling("striped", full_width = F) %>%
+  add_footnote(
+    c(
+      'n = number of patients included in that statistic. Summary statistic = the median (IQR) value for continuous data, and the number and frequency (%) of patients with the characteristic for categorical data. Definite TBM = positive acid fast bacilli (AFB) on CSF Ziehl Neelson stain, OR positive CSF TB GeneXpert test, OR positive CSF TB culture. Probable or possible TBM = patient treated as TBM, AND patient does not meet criteria for \'definite TBM\' (above), AND no additional confirmed brain infection (as below). Confirmed non-TBM = microbiologically confirmed other brain infection. Confirmed additional brain infection includes positive CSF India Ink stain, OR CSF cryptococcal antigen, OR positive blood cryptococcal antigen, OR positive CSF bacterial Gram stain, OR positive CSF bacterial culture, OR positive CSF viral or helminth PCR test.',
+      'ART status of a patient is unknown if i) they are/was on ART treatment and the start ART date is missing; or ii) their ART status is unknown.',
+      'Numbers in parentheses are the 25th and 75th quantile.'
+    ),
+    notation = 'symbol'
+  )
+
+```
+
+
+# Overall survival
+The primary endpoint is overall survival, i.e. time from randomisation to death, until 12 months of follow-up.
+
+### Table 2: Table for Cox models
+
+```{r, warning=FALSE}
+bl.ep$tbmgrade <- as.factor(bl.ep$tbmgrade)
+bl.ep$site <- as.factor(bl.ep$site)
+
+s1 <- surv.comparison.subgroup(base.model = Surv(tt_death,ev_death) ~ arm,
+                              subgroup.model = ~ tbmgrade, data = as.data.frame(bl.ep), labels = 'TBM Grade', add.risk = F)
+s2 <- surv.comparison.subgroup(base.model = Surv(tt_death,ev_death) ~ arm,
+                              subgroup.model = ~ site, data = as.data.frame(bl.ep), labels = 'Site', add.risk = F)
+s <- rbind(s1,s2[-c(1:3),])
+colnames(s) <- s[1,]
+# kable(s[-1,])
+kable(s[-1,], "html") %>%
+  kable_styling("striped", full_width = F)
+
+
+```
+
+Overall survival in all patients is analyzed with a Cox proportional hazards regression model with treatment as the only covariate.
+
+
+### Kaplan-Meier plots
+
+Figure 1: Kaplan-Meier curves of overall survival.
+
+```{r}
+kmplot_t(fit = survfit(Surv(tt_death, ev_death) ~ arm, data = bl.ep), rhs = bl.ep$arm)
+```
+
+### Table 3: Follow up in patients not known to have died
+
+```{r}
+bl.ep$fu.cat <- ifelse(bl.ep$ev_death==1,"Death",
+                       ifelse(bl.ep$lfu == "Yes", "Lost to follow-up or consent withdrawn",
+                              ifelse(bl.ep$tt_death>=24*365, "Completed 24 months follow-up", "Ongoing follow-up")))
+bl.ep$fu.cat <- factor(bl.ep$fu.cat, levels = c("Lost to follow-up or consent withdrawn","Ongoing follow-up","Completed 24 months follow-up"))
+Hmisc::label(bl.ep$fu.cat) <- 'Follow-up categories'
+tab <- mySummary.allvar(blvars = as.data.frame(bl.ep)[,c("age","fu.cat")], group = as.data.frame(bl.ep)$arm)
+colnames(tab) <- c('', '', arms[1], '', arms[2])
+tab[1, 3] <- strsplit(tab[1,3], '[\\(\\)]')[[1]][2]
+tab[1, 5] <- strsplit(tab[1,5], '[\\(\\)]')[[1]][2]
+```
+
+```{r}
+kable(tab[-c(3),], "html") %>%
+  kable_styling("striped", full_width = F) %>%
+  add_footnote(
+    c('N = number of patients with that characteristic, shown with the corrsponding % of patients within that intervention group. '),
+    notation = 'none'
+  )
+
+```
+
+
+# Requirement for corticosteroids
+### Table 4: Requirement for open label corticosteroids during period of study drug
+
+```{r, warning=FALSE}
+# Number of cases
+tmp <- merge(subset(bl.ep, select = c(usubjid, tbmgrade, site, arm)),
+             odduring, by = "usubjid", all.y = T)
+tmp$all <- "All patients"
+tmp$all <- as.factor(tmp$all)
+t1 <- my_opendex_fun(data = tmp, varlist = tmp[,c("all","tbmgrade", "site")], fulldata = bl.ep)
+
+# Reason
+names(tmp)[names(tmp)=="reasonopenoth"] <- "Other"
+newtmp1 <- tmp %>%
+  gather(reason, value, fallgcs:extraneuiris) %>% 
+  filter(value==1) %>%
+  select(usubjid, reason, arm) %>%
+  mutate(
+    reason = case_when(
+      reason == 'fallgcs' ~ 'Fall in GCS >= 2 points for >= 48 hours',
+      reason == 'neudeficit' ~ 'New focal neurological deficit',
+      reason == 'paradoxical' ~ 'Paradoxical reaction',
+      reason == 'neuroiris' ~ 'Neurological IRIS',
+      reason == 'extraneuiris' ~ 'Extra-neurological IRIS',
+      reason == 'seizures' ~ 'New onset of seizures (focal or generalized)',
+      
+      TRUE ~ paste0(toupper(substring(reason, 1, 1)), substring(reason,2), ' on brain imaging')
+    )
+  )
+
+newtmp2 <- tmp %>%
+  gather(reason, value, Other) %>% 
+  filter(value!="") %>%
+  select(usubjid, value, arm) %>%
+  dplyr::rename(reason=value)
+
+newtmp <- rbind(newtmp1, newtmp2)
+newtmp$reason <- as.factor(newtmp$reason)
+# newtmp$reason <- factor(newtmp$reason, levels = c(paste(names(tmp[,6:16])), 'Other'))
+# newtmp$reason <- droplevels(newtmp$reason)
+tab1 <- table(bl.ep$arm)
+t2 <- onevar.func(data = newtmp, tab0 = tab1,variable = newtmp$reason)
+t2.n1 <- as.numeric(sapply(strsplit(t2[,2], ' '), function(string) string[[1]]))
+t2.n2 <- as.numeric(sapply(strsplit(t2[,3], ' '), function(string) string[[1]]))
+t2.n <- t2.n1+t2.n2
+t2 <- cbind(t2, t2.n1, t2.n2, t2.n)
+t2 <- mySummary.sort(t2, desc(t2.n), desc(t2.n1), desc(t2.n2))
+t2 <- t2[,1:3]
+# bind the two parts together
+colnames(t2) <- colnames(t1)
+t <- rbind(t1,as.data.frame(t2))
+rownames(t) <- NULL
+
+kable(t, "html") %>%
+  kable_styling("striped", full_width = F) %>%
+  add_header_above(c(" " = 1, arms[1], arms[2])) %>%
+  group_rows("MRC Grade", 2, 4) %>%
+  group_rows("Site", 5, 5+length(unique(base$site))-1) %>%
+  group_rows("Reason", 5+length(unique(base$site)), nrow(t)) %>%
+  add_footnote(
+    c(
+      'N = number of patients with that characteristic',
+      'Data represented as N (%) of all patients receiving that intervention.',
+      'All other reasons here are Herniation. '
+    ),
+    notation = 'none'
+  )
+```
+
+
+### Table 5: Requirement for open label corticosteroids after completion of study drug
+
+```{r, warning=FALSE}
+tmp <- merge(subset(bl.ep, select = c(usubjid, site, arm)),
+             odafter, by = "usubjid", all.y = T)
+tmp$all <- "All patients"
+tmp$all <- as.factor(tmp$all)
+tmp$reasonstart[tmp$reasonstart ==""] <- "Tuberculoma"
+tmp$usubjid[is.na(tmp$reasonstart)] <- "Tuberculoma"
+
+tmp$reasonstart <- as.factor(tmp$reasonstart)
+tmp$tbmgrade <- as.factor(tmp$tbmgrade)
+
+t <- my_opendex_fun(data = tmp, varlist = tmp[,c("all","tbmgrade", "site","reasonstart")], fulldata = bl.ep)
+
+kable(t, "html") %>%
+  kable_styling("striped", full_width = F) %>%
+  add_header_above(c(" " = 1, arms[1], arms[2])) %>%
+  group_rows("MRC Grade", 2, 4) %>%
+  group_rows("Site", 5, 5+length(levels(bl.ep$site))-1)  %>%
+  group_rows("Reason", 5+length(levels(bl.ep$site)), nrow(t)) %>%
+  add_footnote(
+    c(
+      'Completion of study drug is defined as completion of 6 weeks of study drug for enrollment Grade 1, or completion of 8 weeks of study drug for enrollment Grades 2 or 3.',
+      'N = number of patients with that characteristic',
+      'Data represented as N (%) of all patients receiving that intervention'
+    ),
+    notation = 'none'
+  )
+
+```
+
+
+# Drug induced liver injury (DILI) study
+
+## Summary of DILI strategy by studies and treatment arm
+
+### Table 6A: DILI participants by Study
+
+```{r}
+##### manually correct the death event JUST FOR THIS 3RD ANALYSIS (should be deleted in the future)
+names(opfu.27TB) <- tolower(names(opfu.27TB))
+dili.27TB <- dili.27TB %>% 
+  left_join(opfu.27TB %>% select(usubjid, datefu), by = 'usubjid') 
+dili.27TB <- dili.27TB  %>%
+  mutate(
+    date_death = case_when(
+      !is.na(date_death) ~ date_death,
+      is.na(reasonlostfu) ~ datefu,
+      usubjid == '003-3004' ~ as.Date(NA)
+    ),
+    ev_death = if_else(!is.na(ev_death)|usubjid == '003-3004', ev_death, 0)
+  )
+
+#######################
+
+bl.dili <- left_join(dili, bl.ep, by = 'usubjid')
+bl.dili.27TB <- left_join(dili.27TB, bl.ep.27TB, by = 'usubjid')
+bl.dili.combined <-
+  bind_rows(
+     bl.dili %>% select(usubjid, arm) %>% mutate(studyid = '26TB'),
+     bl.dili.27TB %>% select(usubjid, arm) %>% mutate(studyid = '27TB')
+  )
+bl.dili.combined$arm <- if_else(is.na(bl.dili.combined$arm), 'Open label corticosteroids for TT genotype', as.character(bl.dili.combined$arm)) %>% as.factor
+  
+tab0 <- mySummary.onevar(varname = "Study", variable = bl.dili.combined$studyid, group = bl.dili.combined$arm)
+colnames(tab0) <- c('','',arms[1],'',arms[2],'','Open label corticosteroids for TT genotype')
+kable(tab0, "html") %>%
+  kable_styling("striped", full_width = F)
+```
+
+### Table 6B: DILI participants in 27TB by LTA4H Genotype
+
+```{r}
+# just summary over those in dili study
+dili.base <- merge(subset(bl.ep, select = c(usubjid, arm, ev_death)),
+                   subset(dili, select = c("usubjid", "strategy","alt_dili","bili_dili",       
+                                           "inr_dili", "alt_peak" , "bili_peak","inr_peak", 
+                                           "death_duringdili", "deathdays_tb"  , "deathdays_art" ,"deathdays_dili")),
+                   by = "usubjid")
+dili.base$death_duringdili <- factor(dili.base$death_duringdili, levels = c(0,1))
+dili.base$ev_death <- factor(dili.base$ev_death, levels = c(0,1))
+dili.base$strategy <- factor(dili.base$strategy, levels = c(1,2,3), 
+                             labels = c("Monitor","Stop Z","Stop RHZ"))
+dili.base.27TB <-
+  dili.27TB %>%
+  left_join(bl.ep.27TB, by = 'usubjid') %>%
+  mutate(strategy = factor(strategy, levels = c(1,2,3), 
+                             labels = c("Monitor","Stop Z","Stop RHZ")),
+         deathdays_art = NA,
+         death_duringdili = factor(death_duringdili, levels = c(0,1)),
+         ev_death = factor(ev_death, levels = c(0,1))
+  )
+
+base.intersect <- intersect(names(dili.base), names(dili.base.27TB))
+dili.base.combined <- 
+  bind_rows(
+    dili.base %>% select(base.intersect),
+    dili.base.27TB %>% select(base.intersect)
+  )  %>% mutate(arm = if_else(is.na(arm), 'Open label corticosteroids for TT genotype', as.character(arm)) %>% as.factor)
+
+
+bl.ep.27TB$arm <- if_else(is.na(bl.ep.27TB$arm), 'Open label corticosteroids for TT genotype', as.character(bl.ep.27TB$arm)) %>% as.factor
+# tab1 <- mySummary.allvar(blvars = dili.base[,c("strategy","ev_death")], group = dili.base$arm)
+# tab1 <- tab1[1:6,]
+tab1.1 <- mySummary.onevar(varname = 'LTA4H Genotype', variable = bl.ep.27TB$genotype, group = bl.ep.27TB$arm)
+colnames(tab1.1) <- c('','',arms[1],'',arms[2], '', 'Open label corticosteroids for TT genotype')
+kable(tab1.1, "html") %>%
+  kable_styling("striped", full_width = F)
+```
+
+### Table 6C: DILI participants in both 26TB and 27TB by Strategy
+
+```{r}
+tab1.2 <- mySummary.onevar(varname = 'DILI Strategy', variable = dili.base.combined$strategy, group = dili.base.combined$arm)
+colnames(tab1.2) <- c('','',arms[1],'',arms[2], '', 'Open label corticosteroids for TT genotype')
+kable(tab1.2, "html") %>%
+  kable_styling("striped", full_width = F)
+```
+
+## Table 7: Summary of liver parameters and survival of patients in the DILI study
+
+```{r}
+dili.base.combined$ev_death <- factor(dili.base.combined$ev_death, levels = c(0,1), labels = c('No', 'Yes'))
+dili.base.combined$death_duringdili <- factor(dili.base.combined$death_duringdili, levels = c(0,1), labels = c('No', 'Yes'))
+
+Hmisc::label(dili.base.combined[c("alt_dili","bili_dili","inr_dili","alt_peak","bili_peak","inr_peak","ev_death","death_duringdili", "deathdays_tb","deathdays_art","deathdays_dili" )]) <- list("ALT","Bilirubin","INR","ALT Peak","Bilirubin Peak","INR Peak","Total Death","Death during DILI", "Days to death from TB drug start","Days to death from ART start","Days to death from DILI start")
+
+tab2 <- mySummary.allvar(blvars = dili.base.combined[dili.base.combined$arm == levels(dili.base.combined$arm)[1],c("alt_dili","bili_dili","inr_dili","alt_peak","bili_peak","inr_peak","ev_death","death_duringdili", "deathdays_tb","deathdays_art","deathdays_dili" )], 
+                         group = dili.base.combined$strategy[dili.base.combined$arm == levels(dili.base.combined$arm)[1]], cont = c(rep(T,6),F,F,rep(T,3)), contSummary = 'med.range')
+head1 <- c("",paste0(levels(dili.base.combined$arm)[1]), rep("", dim(tab2)[2] - 2))
+tab2 <- rbind(head1, tab2)
+
+tab3 <- mySummary.allvar(blvars = dili.base.combined[dili.base.combined$arm == levels(dili.base.combined$arm)[2],c("alt_dili","bili_dili","inr_dili","alt_peak","bili_peak","inr_peak","ev_death","death_duringdili", "deathdays_tb","deathdays_art","deathdays_dili" )], 
+                         group = dili.base.combined$strategy[dili.base.combined$arm == levels(dili.base.combined$arm)[2]], cont = c(rep(T,6),F,F,rep(T,3)), contSummary = 'med.range')
+head2 <- c("",paste0(levels(dili.base.combined$arm)[2]), rep("", dim(tab3)[2] - 2))
+tab3 <- rbind(head2, tab3)
+
+tab4 <- mySummary.allvar(blvars = dili.base.combined[dili.base.combined$arm == levels(dili.base.combined$arm)[3],c("alt_dili","bili_dili","inr_dili","alt_peak","bili_peak","inr_peak","ev_death","death_duringdili", "deathdays_tb","deathdays_art","deathdays_dili" )], 
+                         group = dili.base.combined$strategy[dili.base.combined$arm == levels(dili.base.combined$arm)[3]], cont = c(rep(T,6),F,F,rep(T,3)), contSummary = 'med.range')
+head3 <- c("",paste0(levels(dili.base.combined$arm)[3]), rep("", dim(tab4)[2] - 2))
+tab4 <- rbind(head3, tab4)
+
+rownames(tab2) <- rownames(tab3) <- rownames(tab4)  <- NULL
+tab.all <- cbind(tab2, tab3[,-1], tab4[,-1])
+tab.all[1,1] <- "Treatment arm"
+tab.all[2,1] <- "DILI strategy"
+tab.all[17,1] <- paste0(tab.all[17,1], footnote_marker_symbol(1))
+row.names(tab.all) <- NULL
+
+headeR <- c(1, 6, 6, 2)
+names(headeR) <- c('Treatment arm', arms[1], arms[2], 'Open label corticosteroids for TT genotype')
+tab.all.2 <- tab.all[-c(1,2), ]
+colnames(tab.all.2) <- tab.all[2,]
+kable(tab.all.2, escape = FALSE) %>%
+  kable_styling("striped", full_width = TRUE) %>% 
+  add_header_above(headeR) %>%
+  group_rows("Entry liver tests", 2, 4) %>% 
+  group_rows("Peak liver tests", 5, 7) %>% 
+  group_rows("Surival information", 8, 13) %>% 
+  group_rows("Death", 14, 16) %>%
+  footnote(symbol = '26TB only') %>%
+  add_footnote(
+    'Numbers in parentheses are the minimum and the maximum value.'
+  )
+  
+```
+
+
+# Adverse event
+The number of patients with any adverse events and specific events, respectively, are summarised and informally compared between the two treatment arms based on Fisher's exact test 
+
+## Table 8: Summary of clinical grade 3 & 4 adverse events
+In the following table, we excluded patient with missing information for the aforementioned information.
+
+```{r}
+ae <- ae %>% dplyr::filter(usubjid %in% pop$usubjid)
+ae.toSummary <- 
+  ae %>%
+  mutate(
+    otherae.order = order(othaespec),
+    aeterm = if_else(aeterm %in% c(10, ''), otherae.order + 9, as.numeric(aeterm)),
+    aename = case_when(
+      grepl('Worsening level of consciousness', aename.full) ~ 'Fall in GCS >=2points for >=48hrs or fall in GCS requiring an intervention',
+      grepl('New focal neurological sign', aename.full) ~ 'New focal neurological sign (lasting >24 hours)',
+      grepl('Hyponatraemia requiring intervention ', aename.full) ~ 'Hyponatraemia requiring intervention or medically important',
+      grepl('Hypoglycaemia requiring intervention', aename.full) ~ 'Hypoglycaemia requiring intervention or medically important',
+      grepl('Elevation of blood transaminase concentrations', aename.full) ~ 'Elevation of blood transaminase concentrations >= 3 times the upper limit of normal with symptoms and signs of hepatitis (vomiting, abdominal pain, jaundice)',
+      grepl('Elevation of blood transaminases', aename.full) ~ 'Elevation of blood transaminases >= 5 times the upper limit of normal or a rise in serum bilirubin >2.0mg/dL (>34µmol/L) without symptoms',
+      grepl('HIV Stage 4 illness', aename.full) ~ 'HIV Stage 4 illness (other than TBM)',
+      grepl('Neurological IRIS ', aename.full) ~ 'Neurological IRIS',
+      grepl('Non-neurological IRIS ', aename.full) ~ 'Non-neurological IRIS',
+      aename.full == '' ~ 'Other events',
+      TRUE ~ aename.full
+    )
+  )
+
+
+ae.toSummary$aeterm <- factor(ae.toSummary$aeterm, levels = c('0', sort(unique(ae.toSummary$aeterm))))
+t <- mySummary.ae(ae = subset(ae.toSummary, grade %in% c("3","4")),pt.arm = bl.ep)
+colnames(t) <- t[1,]
+t <- mySummary.ae.sort(t, desc(V3), desc(V5), marginTop = 1:3) 
+# ADD Kaposi\'s sarcoma manually
+if (!'Kaposi\'s sarcoma' %in% ae.toSummary$aename.full)
+  t <- rbind(t[1:3,], c('Kaposi\'s sarcoma', '0 (0%)', '0', '0 (0%)', '0', '\\-'), t[4:nrow(t),])
+
+kable(t[-1,], "html", escape = FALSE) %>%
+  kable_styling("striped", full_width = T) %>%
+  column_spec(1, width = "20em") %>%
+  column_spec(2, width = "7em") %>%
+  column_spec(4, width = "7em") %>%
+  add_footnote(
+    c(
+      'ULN = Upper limit of normal',
+      'N.pt = the number of patients with at least one adverse event (% of all patients receiving the same intervention)',
+      'N.ae = number of adverse event episodes'
+    ),
+    notation = 'none'
+  )
+```
+
+## Table 9: Summary of serious adverse events
+
+```{r}
+t <- mySummary.ae(ae = subset(ae.toSummary,sae=="Y"),pt.arm = bl.ep)
+colnames(t) <- t[1,]
+t <- mySummary.ae.sort(t, desc(V3), desc(V5), marginTop = 1:3)  
+# ADD Kaposi\'s sarcomamanually
+if (!'Kaposi\'s sarcoma' %in% ae.toSummary$aename.full)
+  t <- rbind(t[1:3,], c('Kaposi\'s sarcoma', '0 (0%)', '0', '0 (0%)', '0', '\\-'), t[4:nrow(t),])
+colnames(t) <- t[1,]
+kable(t[-1,], "html", escape = FALSE) %>%
+  kable_styling("striped", full_width = T) %>%
+  column_spec(1, width = "20em") %>%
+  column_spec(2, width = "7em") %>%
+  column_spec(4, width = "7em") 
+```
+
+## Table 10: Summary of serious adverse events possibly, probably, or definitely related to the study drug
+
+
+```{r}
+t <- mySummary.ae(ae = subset(ae.toSummary,relatestdr %in% c("1","2","3") & sae == "Y"),pt.arm = bl.ep)
+colnames(t) <- t[1,]
+t <- mySummary.ae.sort(t, desc(V3), desc(V5), marginTop = 1:3)  
+# ADD Kaposi\'s sarcoma manually
+if (!'Kaposi\'s sarcoma' %in% ae.toSummary$aename.full)
+  t <- rbind(t[1:3,], c('Kaposi\'s sarcoma', '0 (0%)', '0', '0 (0%)', '0', '\\-'), t[4:nrow(t),])
+colnames(t) <- t[1,]
+kable(t[-1,], "html", escape = FALSE) %>%
+  kable_styling("striped", full_width = F)
+```
+
+## Table 11: Summary of adverse events leading to TB treatment or ARV interuptions
+
+```{r}
+t <- mySummary.ae(ae = subset(ae.toSummary, tbarvdrugstop == "Yes"),pt.arm = bl.ep)
+colnames(t) <- t[1,]
+t <- mySummary.ae.sort(t, desc(V3), desc(V5), marginTop = 1:3) 
+colnames(t) <- t[1,]
+kable(t[-1,], "html", escape = FALSE) %>%
+  kable_styling("striped", full_width = F)
+```
+
+## Table 12: Summary of Grade 3 & 4 laboratory abnormalities
+
+```{r}
+labae$aeterm <- labae$aename
+t <- mySummary.ae(labae,pt.arm = bl.ep)
+colnames(t) <- t[1,]
+t <- mySummary.ae.sort(t, desc(V3), desc(V5), marginTop = 1:3) 
+t[2,1] <- "Lab abnormality"
+t[3,1] <- "Any selected lab abnormality"
+colnames(t) <- t[1,]
+kable(t[-1,], "html", escape = FALSE) %>%
+  kable_styling("striped", full_width = F)
+
+```
+
+
+The total number of adverse event episodes per patient (including clinical adverse event of all grades and lab abnormalities grade 3 and 4) are summarized and compared based on a quasi-Poisson regression model with treatment as the only covariate.
+
+```{r}
+# combine ae and lab ae
+ae.all <- plyr::rbind.fill(ae, labae)
+ae.ep <- ae %>%
+  group_by(usubjid) %>%
+  dplyr::summarise(nae = n())
+ae.dat <- merge(ae.ep, bl.ep, by = "usubjid", all.x = TRUE)
+
+fit <- glm(nae ~ arm, data = ae.dat, family = quasipoisson)
+tab <- round(coef(summary(fit)), 2)
+tab[-1,-3] %>% 
+  kable() %>% 
+  kable_styling("striped", full_width = F)
+
+```
+
+Of `r meta.nSCR` patients randomised, post-baseline CRFs are available for `r meta.nBL`, of whom `r meta.nLAB` have laboratory data available.
